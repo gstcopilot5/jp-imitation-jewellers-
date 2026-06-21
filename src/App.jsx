@@ -140,6 +140,42 @@ async function sbGetEvents(token) {
   return r.json();
 }
 
+/* products (client-managed collections) */
+async function sbGetProducts() {
+  if (!sbReady()) return null;
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/products?select=*&order=created_at.desc`, {
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+  });
+  if (!r.ok) return null;
+  return r.json();
+}
+async function sbSaveProduct(token, p) {
+  const headers = { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json", Prefer: "return=representation" };
+  const body = JSON.stringify({ title: p.title, description: p.description, image_url: p.image_url });
+  const url = p.id ? `${SUPABASE_URL}/rest/v1/products?id=eq.${p.id}` : `${SUPABASE_URL}/rest/v1/products`;
+  const r = await fetch(url, { method: p.id ? "PATCH" : "POST", headers, body });
+  if (!r.ok) throw new Error("save");
+  return (await r.json())[0];
+}
+async function sbDeleteProduct(token, id) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${id}`, {
+    method: "DELETE",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) throw new Error("delete");
+}
+async function sbUploadImage(token, file) {
+  const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+  const path = `p_${Date.now()}.${ext}`;
+  const r = await fetch(`${SUPABASE_URL}/storage/v1/object/products/${path}`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  if (!r.ok) throw new Error("upload");
+  return `${SUPABASE_URL}/storage/v1/object/public/products/${path}`;
+}
+
 const SETUP_SQL = `-- OFFERS
 create table if not exists offers (
   id uuid primary key default gen_random_uuid(),
@@ -178,7 +214,33 @@ alter table events enable row level security;
 create policy "anyone can log" on events
   for insert to anon with check (true);
 create policy "admin reads events" on events
-  for select to authenticated using (true);`;
+  for select to authenticated using (true);
+
+-- PRODUCTS (client-managed collection)
+create table if not exists products (
+  id uuid primary key default gen_random_uuid(),
+  title text,
+  description text,
+  image_url text,
+  created_at timestamptz default now()
+);
+alter table products enable row level security;
+create policy "read products" on products
+  for select to anon using (true);
+create policy "admin products" on products
+  for all to authenticated using (true) with check (true);
+
+-- IMAGE STORAGE for product photos
+insert into storage.buckets (id, name, public)
+  values ('products','products', true) on conflict (id) do nothing;
+create policy "product img read" on storage.objects
+  for select to anon using (bucket_id = 'products');
+create policy "product img write" on storage.objects
+  for insert to authenticated with check (bucket_id = 'products');
+create policy "product img update" on storage.objects
+  for update to authenticated using (bucket_id = 'products');
+create policy "product img delete" on storage.objects
+  for delete to authenticated using (bucket_id = 'products');`;
 
 /* ---------- tiny inline sparkle / diamond mark ---------- */
 const Diamond = ({ size = 26, c = GOLD }) => (
@@ -562,45 +624,67 @@ function Trust() {
 function Collections() {
   const ref = useReveal();
   const { addToBag } = useBag();
-  const cats = [
-    ["Bridal Collection", "Showstopping wedding sets", "#2a0010", "#8a0f28"],
-    ["American Diamond", "Brilliant AD sparkle", "#0a1426", "#2c5aa0"],
-    ["Necklace Sets", "Statement neckpieces", "#1c0009", "#7a0c1f"],
-    ["Pendant Sets", "Everyday elegance", "#07150e", "#1f7a4d"],
-    ["Earrings", "From studs to jhumkas", "#26000d", "#9a1030"],
-    ["Bangles", "Kadas & bangle sets", "#140d05", "#5c3a14"],
-    ["Fashion Jewellery", "Trend-led pieces", "#180009", "#5c0018"],
+  const defaultCats = [
+    ["Bridal Collection", "Showstopping wedding sets", "#2a0010", "#8a0f28", "/bridal.jpg"],
+    ["American Diamond", "Brilliant AD sparkle", "#0a1426", "#2c5aa0", "/ad.jpg"],
+    ["Necklace Sets", "Statement neckpieces", "#1c0009", "#7a0c1f", "/necklace.jpg"],
+    ["Pendant Sets", "Everyday elegance", "#07150e", "#1f7a4d", "/pendant.jpg"],
+    ["Earrings", "From studs to jhumkas", "#26000d", "#9a1030", "/earrings.jpg"],
+    ["Bangles", "Kadas & bangle sets", "#140d05", "#5c3a14", "/bangles.jpg"],
+    ["Fashion Jewellery", "Trend-led pieces", "#180009", "#5c0018", "/fashion.jpg"],
   ];
+  const tones = [["#2a0010", "#8a0f28"], ["#0a1426", "#2c5aa0"], ["#1c0009", "#7a0c1f"], ["#07150e", "#1f7a4d"], ["#26000d", "#9a1030"], ["#140d05", "#5c3a14"]];
+
+  const [products, setProducts] = useState(null);
+  useEffect(() => {
+    let on = true;
+    (async () => { try { const p = await sbGetProducts(); if (on && p) setProducts(p); } catch (e) {} })();
+    return () => { on = false; };
+  }, []);
+
+  const usingProducts = products && products.length > 0;
+  const items = usingProducts
+    ? products.map((p, i) => ({ name: p.title || "Untitled", sub: p.description || "", img: p.image_url || "", c1: tones[i % tones.length][0], c2: tones[i % tones.length][1] }))
+    : defaultCats.map(([name, sub, c1, c2, img]) => ({ name, sub, c1, c2, img }));
+
   return (
     <section className="section" id="collections" ref={ref}>
       <div className="section-head reveal">
         <span className="eyebrow">The Collections</span>
         <Heading>Curated To Be Worn &amp; Remembered</Heading>
         <p className="lead">
-          Seven signature lines — each chosen for craft, finish and the way it catches the light.
+          Hand-picked pieces — each chosen for craft, finish and the way it catches the light.
         </p>
       </div>
       <div className="col-grid">
-        {cats.map(([name, sub, c1, c2], i) => (
+        {items.map((it, i) => (
           <Tilt
-            key={name}
+            key={(it.name || "item") + i}
             className={`reveal col-card ${i === 0 ? "feature" : ""}`}
             max={7}
             style={{ transitionDelay: `${(i % 4) * 70}ms` }}
           >
-            {/* PLACEHOLDER media — swap with <img> later */}
-            <div className="col-media" style={{ background: `radial-gradient(120% 120% at 30% 20%, ${c2}, ${c1} 70%)` }}>
+            <div className="col-media" style={{ background: `radial-gradient(120% 120% at 30% 20%, ${it.c2}, ${it.c1} 70%)` }}>
               <div className="col-shine" />
               <Diamond size={i === 0 ? 40 : 30} c="rgba(212,175,55,.85)" />
+              {it.img && (
+                <img
+                  className="col-img"
+                  src={it.img}
+                  alt={it.name}
+                  loading="lazy"
+                  onError={(e) => { e.currentTarget.style.display = "none"; }}
+                />
+              )}
             </div>
             <div className="col-overlay">
-              <h3>{name}</h3>
-              <p>{sub}</p>
+              <h3>{it.name}</h3>
+              {it.sub && <p>{it.sub}</p>}
               <div className="col-cta-row">
-                <a href={WA(`Hi, please share your latest ${name}.`)} target="_blank" rel="noreferrer" className="col-link">
+                <a href={WA(`Hi, please share details on "${it.name}".`)} target="_blank" rel="noreferrer" className="col-link">
                   Enquire →
                 </a>
-                <button className="col-add" onClick={() => addToBag({ name })}>+ Add to bag</button>
+                <button className="col-add" onClick={() => addToBag({ name: it.name })}>+ Add to bag</button>
               </div>
             </div>
           </Tilt>
@@ -1006,6 +1090,90 @@ function useHashRoute() {
   return hash;
 }
 
+function ProductsEditor({ token, configured }) {
+  const demo = !configured || token === "demo";
+  const [list, setList] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    if (!demo) (async () => { try { const p = await sbGetProducts(); setList(p || []); } catch (e) {} })();
+  }, [token]);
+
+  const startNew = () => { setEditing({ title: "", description: "", image_url: "" }); setFile(null); setPreview(""); setMsg(""); };
+  const startEdit = (p) => { setEditing({ ...p }); setFile(null); setPreview(p.image_url || ""); setMsg(""); };
+  const pickFile = (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; setFile(f); setPreview(URL.createObjectURL(f)); };
+
+  const save = async () => {
+    if (!editing.title) { setMsg("Please add a title."); return; }
+    if (demo) { setMsg("Connect Supabase to save products (needs image storage)."); return; }
+    setBusy(true); setMsg("");
+    try {
+      let image_url = editing.image_url || "";
+      if (file) image_url = await sbUploadImage(token, file);
+      const saved = await sbSaveProduct(token, { ...editing, image_url });
+      setList((l) => [saved, ...l.filter((x) => x.id !== saved.id)]);
+      setEditing(null); setFile(null); setPreview(""); setMsg("Saved — live on the site.");
+    } catch { setMsg("Save failed — check the products table & storage bucket."); }
+    finally { setBusy(false); }
+  };
+  const del = async (p) => {
+    setList((l) => l.filter((x) => x.id !== p.id));
+    if (!demo) { try { await sbDeleteProduct(token, p.id); } catch (e) {} }
+  };
+
+  return (
+    <>
+      {demo && <p className="note">Connect Supabase to add real products with photo uploads. The site shows the default collection until then.</p>}
+
+      {editing ? (
+        <div className="prod-form">
+          <div className="field"><label>Title</label>
+            <input className="inp" value={editing.title || ""} onChange={(e) => setEditing({ ...editing, title: e.target.value })} placeholder="e.g. Royal Kundan Bridal Set" /></div>
+          <div className="field"><label>Description</label>
+            <textarea className="inp" rows={3} value={editing.description || ""} onChange={(e) => setEditing({ ...editing, description: e.target.value })} placeholder="Short description shown on the card" /></div>
+          <div className="field"><label>Photo</label>
+            <label className="file-btn">
+              {preview ? "Change photo" : "Choose photo"}
+              <input type="file" accept="image/*" onChange={pickFile} hidden />
+            </label>
+            {preview && <img className="prod-preview" src={preview} alt="preview" />}
+          </div>
+          <div className="row" style={{ marginTop: "1rem" }}>
+            <button className="btn btn-gold" style={{ flex: 1 }} onClick={save} disabled={busy}>{busy ? "Saving…" : "Save Product"}</button>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setEditing(null)}>Cancel</button>
+          </div>
+          {msg && <p className="note ok">{msg}</p>}
+        </div>
+      ) : (
+        <>
+          <button className="btn btn-gold" style={{ width: "100%", marginBottom: "1.2rem" }} onClick={startNew}>+ Add Product</button>
+          {msg && <p className="note ok">{msg}</p>}
+          <div className="prod-list">
+            {list.length === 0 && <p className="note">No products yet. Tap “Add Product” to create your first one.</p>}
+            {list.map((p) => (
+              <div className="prod-row" key={p.id}>
+                <div className="prod-thumb" style={{ backgroundImage: p.image_url ? `url(${p.image_url})` : "none" }} />
+                <div className="prod-info">
+                  <strong>{p.title || "Untitled"}</strong>
+                  <span>{p.description}</span>
+                </div>
+                <div className="prod-actions">
+                  <button onClick={() => startEdit(p)}>Edit</button>
+                  <button onClick={() => del(p)} aria-label="Delete"><CloseIcon s={15} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 function OfferEditor({ token, configured }) {
   const [offer, setOffer] = useState(DEFAULT_OFFER);
   const [busy, setBusy] = useState(false);
@@ -1176,7 +1344,7 @@ function Admin() {
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const [tab, setTab] = useState("offer");
+  const [tab, setTab] = useState("products");
 
   const login = async () => {
     setBusy(true); setMsg("");
@@ -1218,7 +1386,7 @@ function Admin() {
     );
   }
 
-  const tabs = [["offer", "Offer"], ["announcements", "Announcements"], ["analytics", "Analytics"]];
+  const tabs = [["products", "Products"], ["offer", "Offer"], ["announcements", "Announcements"], ["analytics", "Analytics"]];
   return (
     <div className="admin">
       <div className="admin-card wide">
@@ -1231,6 +1399,7 @@ function Admin() {
             <button key={k} className={`tab-btn ${tab === k ? "active" : ""}`} onClick={() => setTab(k)}>{t}</button>
           ))}
         </div>
+        {tab === "products" && <ProductsEditor token={token} configured={configured} />}
         {tab === "offer" && <OfferEditor token={token} configured={configured} />}
         {tab === "announcements" && <AnnouncementsEditor token={token} configured={configured} />}
         {tab === "analytics" && <AnalyticsView token={token} configured={configured} />}
@@ -1738,12 +1907,13 @@ h1,h2,h3,h4{font-family:'Bodoni Moda',Georgia,serif;font-weight:700;line-height:
 .col-card{position:relative;border-radius:18px;overflow:hidden;min-height:300px;
   border:1px solid rgba(212,175,55,.14);display:flex;cursor:pointer}
 .col-card.feature{grid-column:span 2;grid-row:span 2;min-height:620px}
-.col-media{flex:1;display:flex;align-items:center;justify-content:center;position:relative;
+.col-media{flex:1;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;
   transition:transform .6s cubic-bezier(.2,.7,.2,1)}
 .col-card:hover .col-media{transform:scale(1.07)}
+.col-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1}
 .col-shine{position:absolute;inset:0;background:
   radial-gradient(60% 50% at 30% 20%,rgba(255,255,255,.16),transparent 60%)}
-.col-overlay{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;
+.col-overlay{position:absolute;inset:0;z-index:2;display:flex;flex-direction:column;justify-content:flex-end;
   padding:1.6rem;background:linear-gradient(180deg,transparent 40%,rgba(9,9,9,.86))}
 .col-overlay h3{font-size:1.35rem}
 .col-card.feature .col-overlay h3{font-size:2rem}
@@ -2017,6 +2187,22 @@ h1,h2,h3,h4{font-family:'Bodoni Moda',Georgia,serif;font-weight:700;line-height:
 .bar-col .bar{width:100%;min-height:3px;border-radius:6px 6px 0 0;margin-top:auto;
   background:linear-gradient(180deg,#f0d98a,var(--gold))}
 .bar-col span{font-size:.64rem;color:var(--muted)}
+
+/* ===== PRODUCTS MANAGER ===== */
+.file-btn{display:inline-block;cursor:pointer;background:rgba(212,175,55,.12);border:1px dashed rgba(212,175,55,.5);
+  color:#f3e6c4;border-radius:10px;padding:.7rem 1rem;font-size:.85rem;letter-spacing:.04em}
+.file-btn:hover{background:rgba(212,175,55,.2)}
+.prod-preview{margin-top:.9rem;width:100%;max-height:220px;object-fit:cover;border-radius:12px;border:1px solid rgba(212,175,55,.2)}
+.prod-list{display:flex;flex-direction:column;gap:.7rem}
+.prod-row{display:flex;align-items:center;gap:.9rem;padding:.6rem;border:1px solid rgba(212,175,55,.14);border-radius:12px}
+.prod-thumb{width:54px;height:54px;flex:0 0 54px;border-radius:9px;background:#2a0010 center/cover no-repeat;border:1px solid rgba(212,175,55,.2)}
+.prod-info{flex:1;min-width:0;text-align:left}
+.prod-info strong{display:block;font-size:.95rem;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prod-info span{display:block;font-size:.78rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prod-actions{display:flex;align-items:center;gap:.4rem}
+.prod-actions button{background:rgba(212,175,55,.12);border:1px solid rgba(212,175,55,.3);color:#f3e6c4;
+  border-radius:8px;padding:.35rem .6rem;font-size:.74rem;cursor:pointer;display:flex;align-items:center}
+.prod-actions button:hover{background:rgba(212,175,55,.22)}
 
 /* ===== RESPONSIVE ===== */
 @media (max-width:1024px){
